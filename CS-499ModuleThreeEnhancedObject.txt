@@ -1,0 +1,638 @@
+/* Header Inclusions*/
+#include <iostream>
+#include <GL/glew.h>
+#include <GL/freeglut.h>
+
+// GLM Math Header Inclusions
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+
+// SOIL Image loader Inclusion
+#include "SOIL2/SOIL2.h"
+
+using namespace std; // Standard namespace
+
+#define WINDOW_TITLE "Modern OpenGL - CS-499 Enhanced Artifact" // Window title Macro
+
+/*Shader program Macro*/
+#ifndef GLSL
+#define GLSL(Version, Source) "#version " #Version "\n" #Source
+#endif
+
+// Global variable declarations
+int view_state = 1;
+
+/*Variable declarations for shader, window size initialization, buffer and array objects*/
+GLint spoonShaderProgram, lampShaderProgram, WindowWidth = 800, WindowHeight = 600;
+GLuint VBO, SpoonVAO, LightVAO, texture;
+
+GLfloat cameraSpeed = 0.0005f; // Movement speed per frame
+
+
+GLchar currentKey; // Will store key pressed
+
+GLfloat lastMouseX = 400, lastMouseY = 300; // Locks mouse cursor at the center of the screen
+GLfloat mouseXOffset, mouseYOffset, yaw = 0.0f, pitch = 0.0f; // mouse offset, yaw, and pitch variables
+GLfloat sensitivity = 0.5f; // Used for mouse / camera rotation sensitivity
+bool mouseDetected = true; // Initially true when mouse movement is detected
+
+// Global vector declarations
+glm::vec3 cameraPosition = glm::vec3(-2.0f, 1.0f, 2.0f); // Initial camera position.
+glm::vec3 CameraUpY = glm::vec3(0.0f, 1.0f, 0.0f); // Temporary y unit vector
+glm::vec3 CameraForwardZ = glm::vec3(0.0f, 0.0f, -1.0f); // Temporary z unit vector
+glm::vec3 front; // Temporary z unit vector for mouse
+
+// Subject position / scale
+glm::vec3 spoonPosition(0.0f, 0.0f, 0.0f);
+glm::vec3 spoonScale(2.0f);
+
+// spoon and light color
+glm::vec3 objectColor(1.0f, 1.0f, 1.0f);
+glm::vec3 lightColor(1.0f, 1.0f, 1.0f);
+
+// Light position and scale
+glm::vec3 lightPosition(0.5f, 0.5f, 3.0f);
+glm::vec3 lightScale(0.3f);
+
+/*Function prototypes*/
+void UResizeWindow(int, int);
+void URenderGraphics(void);
+void UCreateShader(void);
+void UCreateBuffers(void);
+void pressKey(int key, int xx, int yy);
+void UMouseMove(int x, int y);
+void UGenerateTexture(void);
+
+/*Spoon Vertex Shader Course Code*/
+const GLchar * spoonVertexShaderSource = GLSL(330,
+    layout (location = 0) in vec3 position; // Vertex data from Vertex Attrib Pointer 0
+    layout (location = 1) in vec3 normal; // VAP for normals from Vertex Attrib Pointer 1
+    layout (location = 2) in vec2 textureCoordinate; // Texture vertex data from Vertex Attrib Pointer 2
+
+    out vec3 FragmentPos; // For outgoing color / pixels to fragment shader
+    out vec3 Normal; // For outgoing normals to fragment shader
+    out vec2 mobileTextureCoordinate;
+
+    // Global variables for the transform matrices
+    uniform mat4 model;
+    uniform mat4 view;
+    uniform mat4 projection;
+
+    void main(){
+        gl_Position = projection * view * model * vec4(position, 1.0f); // transforms vertices to clip coordinates
+
+       FragmentPos = vec3(model * vec4(position, 1.0f)); // Gets fragment / pixel position in world space only (exclude view and projection)
+
+       Normal = mat3(transpose(inverse(model))) *  normal; // get normal vectors in world space only and exclude normal translation properties
+
+       mobileTextureCoordinate = vec2(textureCoordinate.x, 1 - textureCoordinate.y); // flips the texture horizontal
+   }
+);
+
+/*Spoon Fragment Shader Source Code*/
+const GLchar * spoonFragmentShaderSource = GLSL(330,
+
+        in vec3 FragmentPos; // For incoming fragment position
+        in vec3 Normal; // For incoming normals
+        in vec2 mobileTextureCoordinate;
+
+        out vec4 spoonColor; // For outgoing spoon color to the GPU
+
+        // Uniform / Global variables for object color, light color, light position, and camera/view position
+        uniform vec3 lightColor;
+        uniform vec3 lightPos;
+        uniform vec3 viewPosition;
+
+        uniform sampler2D uTexture; // Useful when working with multiple textures
+
+    void main(){
+
+       /* Phong lighting model calculations to generate ambient, diffuse, and specular components */
+
+       // Calculate Ambient Lighting
+        float ambientStrength = 0.1f; // Set ambient or global lighting strength
+        vec3 ambient = ambientStrength * lightColor; // Generate ambient light color
+
+       // Calculate Diffuse Lighting
+         vec3 norm = normalize(Normal); // Normalize vectors to 1 unit
+         vec3 lightDirection = normalize(lightPos - FragmentPos); // Calculate distance (light direction) between light source and fragments/pixels on
+         float impact = max(dot(norm, lightDirection), 0.0); // Calculate diffuse impact by generating dot product of normal and light
+         vec3 diffuse = impact * lightColor; // Generate diffuse light color
+
+
+        // Calculate Specular lighting
+           float specularIntensity = 1.6f; // Set specular light strength
+           float highlightSize = 128.0f; // Set specular highlight size
+           vec3 viewDir = normalize(viewPosition - FragmentPos); // Calculate view direction
+           vec3 reflectDir = reflect(-lightDirection, norm); // Calculate reflection vector
+        // Calculate specular component
+           float specularComponent = pow(max(dot(viewDir, reflectDir), 0.0), highlightSize);
+            vec3 specular = specularIntensity * specularComponent * lightColor;
+
+         // Calculate phong result
+            vec3 objectColor = texture(uTexture, mobileTextureCoordinate).xyz;
+            vec3 phong = (ambient + diffuse) * objectColor + specular;
+            spoonColor = vec4(phong, 1.0f); // Send lighting results to GPU
+
+  }
+);
+
+/*Lamp Shader Source Code*/
+const GLchar * lampVertexShaderSource = GLSL(330,
+
+        layout (location = 0) in vec3 position; // VAP position 0 for vertex position data
+
+        // Uniform / Global variables for the transform matrices
+        uniform mat4 model;
+        uniform mat4 view;
+        uniform mat4 projection;
+
+        void main()
+        {
+            gl_Position = projection * view *model * vec4(position, 1.0f); // Transforms vertices into clip coordinates
+        }
+);
+
+
+/*Lamp Fragment Shader Source Code*/
+const GLchar * lampFragmentShaderSource = GLSL(330,
+
+        out vec4 color; // For outgoing lamp color (smaller spoon) to the GPU
+
+        void main()
+        {
+            color = vec4(1.0f); // Set color to white (1.0f, 1.0f, 1.0f) with alpha 1.0
+
+        }
+);
+
+
+/*Main Program*/
+int main(int argc, char* argv[])
+{
+    glutInit(&argc, argv);
+    glutInitDisplayMode(GLUT_DEPTH | GLUT_DOUBLE | GLUT_RGBA);
+    glutInitWindowSize(WindowWidth, WindowHeight);
+    glutCreateWindow(WINDOW_TITLE);
+
+    glutReshapeFunc(UResizeWindow);
+
+
+    glewExperimental = GL_TRUE;
+            if (glewInit() != GLEW_OK)
+            {
+                std::cout << "Failed to initialize GLEW" << std::endl;
+                return -1;
+            }
+
+    UCreateShader();
+
+    UCreateBuffers();
+
+    UGenerateTexture();
+
+    glClearColor(0.8f, 0.8f, 0.8f, 1.0f); // Set background color
+
+    glutDisplayFunc(URenderGraphics);
+
+    glutSpecialFunc(pressKey); // Detects any key press
+
+    glutPassiveMotionFunc(UMouseMove);
+
+    glutMainLoop();
+
+    // Destroys Buffer objects once used
+    glDeleteVertexArrays(1, &SpoonVAO);
+    glDeleteVertexArrays(1, &LightVAO);
+    glDeleteBuffers(1, &VBO);
+
+    return 0;
+}
+
+/*Resizes the window*/
+void UResizeWindow(int w, int h)
+{
+    WindowWidth = w;
+    WindowHeight = h;
+    glViewport(0, 0, WindowWidth, WindowHeight);
+}
+
+
+/*Renders graphics*/
+void URenderGraphics(void)
+{
+
+    glEnable(GL_DEPTH_TEST); // Enable z-depth
+
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); // Clears the screen
+
+    GLint uTextureLoc, lightColorLoc, lightPositionLoc, viewPositionLoc;
+
+    /*********Use the Spoon Shader to activate the Spoon Vertex Array Object for rendering and transforming*********/
+    glUseProgram(spoonShaderProgram);
+    glBindVertexArray(SpoonVAO);
+
+    CameraForwardZ = front; // Replaces camera forward vector with Radians normalized as a unit vector
+
+    // Transforms the object
+    glm::mat4 model;
+    model = glm::translate(model, glm::vec3(0.0f, 0.0f, 0.0f)); // Place the object at the center of the viewport
+    model = glm::rotate(model, 45.0f, glm:: vec3(0.0, 1.0f, 0.0f)); // Rotate the object 45 degrees on the X
+    model = glm::scale(model, glm::vec3(2.0f, 2.0f, 2.0f)); // Increase the object size by a scale of 2
+
+    // Transform the camera
+    glm::mat4 view;
+    view = glm::lookAt(cameraPosition - CameraForwardZ, cameraPosition, CameraUpY);
+
+    // Creates a perspective projection
+    glm::mat4 projection;
+
+    if(view_state == 1){
+            projection = glm::perspective(45.0f, (GLfloat)WindowWidth / (GLfloat)WindowHeight, 0.1f, 100.0f);
+        }else if(view_state == 0){
+            projection = glm::ortho(-5.0f, 5.0f, -5.0f, 5.0f, 0.1f, 100.0f);
+        }
+    // Reference matrix uniforms from the spoon Shader program
+        GLint modelLoc = glGetUniformLocation(spoonShaderProgram, "model");
+        GLint viewLoc = glGetUniformLocation(spoonShaderProgram, "view");
+        GLint projLoc = glGetUniformLocation(spoonShaderProgram, "projection");
+
+        // Pass matrix data to the spoon Shader program's matrix uniforms
+        glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(model));
+        glUniformMatrix4fv(viewLoc, 1, GL_FALSE, glm::value_ptr(view));
+        glUniformMatrix4fv(projLoc, 1, GL_FALSE, glm::value_ptr(projection));
+
+        // Reference matrix uniforms from the spoon Shader program for the spoon color, light color, light position, and camera position
+        uTextureLoc = glGetUniformLocation(spoonShaderProgram, "uTexture");
+        lightColorLoc = glGetUniformLocation(spoonShaderProgram, "lightColor");
+        lightPositionLoc = glGetUniformLocation(spoonShaderProgram, "lightPos");
+        viewPositionLoc = glGetUniformLocation(spoonShaderProgram, "viewPosition");
+
+        // Pass color, light, and camera data to the spoon Shader programs corresponding uniforms
+        glUniform1i(uTextureLoc, 0); // texture unit 0
+        glUniform3f(lightColorLoc, lightColor.r, lightColor.g, lightColor.b);
+        glUniform3f(lightPositionLoc, lightPosition.x, lightPosition.y, lightPosition.z);
+        glUniform3f(viewPositionLoc, cameraPosition.x, cameraPosition.y, cameraPosition.z);
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, texture);
+
+        glDrawArrays(GL_TRIANGLES, 0, 126); // Draw the primitives / spoon
+
+        glBindVertexArray(0); //Deactivate the spoon Vertex Array Object
+
+        /***************Use the Lamp Shader and activate the Lamp Vertex Array Object for rendering and transforming ************/
+        glUseProgram(lampShaderProgram);
+        glBindVertexArray(LightVAO);
+
+        // Transform the smaller spoon used as a visual cue for the light source
+        model = glm::translate(model, lightPosition);
+        model = glm::scale(model, lightScale);
+
+        // Reference matrix uniforms from the Lamp Shader program
+        modelLoc = glGetUniformLocation(lampShaderProgram, "model");
+        viewLoc = glGetUniformLocation(lampShaderProgram, "view");
+        projLoc = glGetUniformLocation(lampShaderProgram, "projection");
+
+        // Pass matrix uniforms from the Lamp Shader Program
+        glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(model));
+        glUniformMatrix4fv(viewLoc, 1, GL_FALSE, glm::value_ptr(view));
+        glUniformMatrix4fv(projLoc, 1, GL_FALSE, glm::value_ptr(projection));
+
+        //Draws the triangles
+        glDrawArrays(GL_TRIANGLES, 0, 126);
+
+        glBindVertexArray(0); // Deactivate the Vertex Array Object
+
+        glutPostRedisplay();
+
+        glutSwapBuffers(); // Flips the back buffer with the front buffer every frame. Similar to GL Flush
+
+    }
+
+
+/*Creates the Shader program*/
+void UCreateShader()
+{
+    // Spoon's Vertex shader
+    GLint spoonVertexShader = glCreateShader(GL_VERTEX_SHADER); // Create the Vertex shader
+    glShaderSource(spoonVertexShader, 1, &spoonVertexShaderSource, NULL); // Attaches the vertex shader to the source code
+    glCompileShader(spoonVertexShader); // Compiles the Vertex shader
+
+    // Spoon's Fragment shader
+    GLint spoonFragmentShader = glCreateShader(GL_FRAGMENT_SHADER); //Create the Fragment shader
+    glShaderSource(spoonFragmentShader, 1, &spoonFragmentShaderSource, NULL); //Attaches the Fragment shader to the source code
+    glCompileShader(spoonFragmentShader); //Compiles the Fragment shader
+
+    // Spoon Shader program
+    spoonShaderProgram = glCreateProgram(); // Creates the Shader program and returns an id
+    glAttachShader(spoonShaderProgram, spoonVertexShader); //Attach Vertex shader to the Shader program
+    glAttachShader(spoonShaderProgram, spoonFragmentShader); // Attach Fragment shader to the Shader program
+    glLinkProgram(spoonShaderProgram); // Link Vertex and Fragment shaders to Shader program
+
+    // Delete the Vertex and Fragment shaders once linked
+    glDeleteShader(spoonVertexShader);
+    glDeleteShader(spoonFragmentShader);
+
+    // Lamp Vertex shader
+    GLint lampVertexShader = glCreateShader(GL_VERTEX_SHADER); // Creates the Vertex shader
+    glShaderSource(lampVertexShader, 1, &lampVertexShaderSource, NULL); // Attaches the Vertex shader to the source code
+    glCompileShader(lampVertexShader); // Compiles the Vertex shader
+
+    // Lamp Fragment shader
+    GLint lampFragmentShader = glCreateShader(GL_FRAGMENT_SHADER); // Creates the Fragment shader
+    glShaderSource(lampFragmentShader, 1, &lampFragmentShaderSource, NULL); // Attaches the Fragment shader to the source code
+    glCompileShader(lampFragmentShader); // Compiles the Fragment shader
+
+    // Lamp Shader Program
+    lampShaderProgram = glCreateProgram(); // Creates the Shader program and returns an id
+    glAttachShader(lampShaderProgram, lampVertexShader); // Attach Vertex shader to the Shader program
+    glAttachShader(lampShaderProgram, lampFragmentShader); // Attach Fragment shader to the Shader program
+    glLinkProgram(lampShaderProgram); // Link Vertex and Fragment shaders to the Shader program
+
+    // Delete the lamp shaders once linked
+    glDeleteShader(lampVertexShader);
+    glDeleteShader(lampFragmentShader);
+
+}
+
+
+void UCreateBuffers()
+{
+
+    GLfloat vertices[] = {
+
+    		                    // Position              // Normals               // Texture      // Point Name
+
+                                // Front-side Scoop        // Positive Z
+                                -0.4f, 0.05f,  0.1f,     0.0f, 0.0f,  1.0f,     0.3f, 1.0f,     //Q
+                                -0.4f, -0.1f,  0.1f,     0.0f, 0.0f,  1.0f,     0.3f, 0.0f,     //R
+                                -0.6f,  0.1f,  0.0f,     0.0f, 0.0f,  1.0f,     0.0f, 1.0f,     //U
+                                -0.4f, 0.05f,  0.1f,     0.0f, 0.0f,  1.0f,     0.3f, 1.0f,     //Q
+                                -0.2f,  0.0f,  0.1f,     0.0f, 0.0f,  1.0f,     0.6f, 1.0f,     //W
+                                -0.4f, -0.1f,  0.1f,     0.0f, 0.0f,  1.0f,     0.3f, 0.0f,     //R
+                                -0.4f, -0.1f,  0.1f,     0.0f, 0.0f,  1.0f,     0.3f, 0.0f,     //R
+                                -0.2f, -0.1f,  0.1f,     0.0f, 0.0f,  1.0f,     1.0f, 1.0f,     //A
+                                -0.2f,  0.0f,  0.1f,     0.0f, 0.0f,  1.0f,     0.6f, 1.0f,     //W
+                                -0.2f,  0.0f,  0.1f,     0.0f, 0.0f,  1.0f,     0.6f, 1.0f,     //W
+                                -0.2f, -0.1f,  0.1f,     0.0f, 0.0f,  1.0f,     0.6f, 0.0f,     //A_1
+                                 0.0f,  0.0f,  0.0f,     0.0f, 0.0f,  1.0f,     1.0f, 1.0f,     //A
+                                 0.0f,  0.0f,  0.0f,     0.0f, 0.0f,  1.0f,     1.0f, 1.0f,     //A
+                                -0.2f, -0.1f,  0.1f,     0.0f, 0.0f,  1.0f,     0.6f, 1.0f,     //A_1
+                                 0.0f, -0.05f, 0.0f,     0.0f, 0.0f,  1.0f,     1.0f, 0.0f,     //B
+
+                             // Bottom-side Scoop Slant     // Negative X
+                                -0.6f,  0.1f,  0.0f,    -1.0f, 0.0f, 0.0f,      0.0f, 0.6f,    //U
+                                -0.6f,  0.1f, -0.1f,    -1.0f, 0.0f, 0.0f,      0.0f, 0.3f,    //V
+                                -0.4f, -0.1f,  0.1f,    -1.0f, 0.0f, 0.0f,      0.3f, 1.0f,    //R
+                                -0.4f, -0.1f,  0.1f,    -1.0f, 0.0f, 0.0f,      0.3f, 1.0f,    //R
+                                -0.4f, -0.1f, -0.2f,    -1.0f, 0.0f, 0.0f,      0.3f, 0.0f,    //T
+                                -0.6f,  0.1f, -0.1f,    -1.0f, 0.0f, 0.0f,      0.0f, 0.3f,    //V
+
+                                // Bottom-side Scoop        // Negative Y
+                                -0.4f, -0.1f, -0.2f,     0.0f, -1.0f, 0.0f,     0.3f, 0.0f,    //T
+                                -0.4f, -0.1f,  0.1f,     0.0f, -1.0f, 0.0f,     0.3f, 1.0f,    //R
+                                -0.2f, -0.1f, -0.2f,     0.0f, -1.0f, 0.0f,     0.6f, 0.0f,    //B_1
+                                -0.2f, -0.1f, -0.2f,     0.0f, -1.0f, 0.0f,     0.6f, 0.0f,    //B_1
+                                -0.4f, -0.1f,  0.1f,     0.0f, -1.0f, 0.0f,     0.3f, 1.0f,    //R
+                                -0.2f, -0.1f,  0.1f,     0.0f, -1.0f, 0.0f,     0.6f, 1.0f,    //A_1
+                                -0.2f, -0.1f,  0.1f,     0.0f, -1.0f, 0.0f,     0.6f, 1.0f,    //A_1
+                                -0.2f, -0.1f, -0.2f,     0.0f, -1.0f, 0.0f,     0.3f, 0.0f,    //B_1
+                                 0.0f, -0.05f, 0.0f,     0.0f, -1.0f, 0.0f,     1.0f, 0.6f,    //B
+                                -0.2f, -0.1f, -0.2f,     0.0f, -1.0f, 0.0f,     0.6f, 0.0f,    //B_1
+                                 0.0f, -0.05f, 0.0f,     0.0f, -1.0f, 0.0f,     1.0f, 0.6f,    //B
+                                 0.0f, -0.05f, -0.1f,    0.0f, -1.0f, 0.0f,     1.0f, 0.3f,    //D
+
+                                 // Back-side Scoop        // Negative Z
+                                 -0.6f,  0.1f, -0.1f,    0.0f, 0.0f, -1.0f,     0.0f, 1.0f,    //V
+                                 -0.4f, 0.05f, -0.2f,    0.0f, 0.0f, -1.0f,     0.3f, 1.0f,    //S
+                                 -0.4f, -0.1f, -0.2f,    0.0f, 0.0f, -1.0f,     0.3f, 0.0f,    //T
+                                 -0.4f, 0.05f, -0.2f,    0.0f, 0.0f, -1.0f,     0.3f, 1.0f,    //S
+                                 -0.4f, -0.1f, -0.2f,    0.0f, 0.0f, -1.0f,     0.3f, 0.0f,    //T
+                                 -0.2f, -0.1f, -0.2f,    0.0f, 0.0f, -1.0f,     0.6f, 0.0f,    //B_1
+                                 -0.4f, 0.05f, -0.2f,    0.0f, 0.0f, -1.0f,     0.3f, 1.0f,    //S
+                                 -0.2f, -0.1f, -0.2f,    0.0f, 0.0f, -1.0f,     0.6f, 0.0f,    //B_1
+                                 -0.2f,  0.0f, -0.2f,    0.0f, 0.0f, -1.0f,     0.6f, 1.0f,    //Z
+                                 -0.2f,  0.0f, -0.2f,    0.0f, 0.0f, -1.0f,     0.6f, 1.0f,    //Z
+                                 -0.2f, -0.1f, -0.2f,    0.0f, 0.0f, -1.0f,     0.6f, 0.0f,    //B_1
+                                  0.0f,  0.0f, -0.1f,    0.0f, 0.0f, -1.0f,     1.0f, 1.0f,    //C
+                                  0.0f,  0.0f, -0.1f,    0.0f, 0.0f, -1.0f,     1.0f, 1.0f,    //C
+                                 -0.2f, -0.1f, -0.2f,    0.0f, 0.0f, -1.0f,     0.6f, 0.0f,    //B_1
+                                  0.0f, -0.05f, -0.1f,   0.0f, 0.0f, -1.0f,     1.0f, 0.0f,    //D
+
+                                 // Top-side Scoop         // Positive Y
+                                 -0.6f,  0.1f,  0.0f,    0.0f,  1.0f, 0.0f,     0.0f, 0.3f, //U
+                                 -0.6f,  0.1f, -0.1f,    0.0f,  1.0f, 0.0f,     0.0f, 0.6f, //V
+                                 -0.4f, 0.05f, -0.2f,    0.0f,  1.0f, 0.0f,     0.3f, 1.0f, //S
+                                 -0.6f,  0.1f,  0.0f,    0.0f,  1.0f, 0.0f,     0.0f, 0.3f, //U
+                                 -0.4f, 0.05f, -0.2f,    0.0f,  1.0f, 0.0f,     0.3f, 1.0f, //S
+                                 -0.4f, 0.05f,  0.1f,    0.0f,  1.0f, 0.0f,     0.3f, 0.0f, //Q
+                                 -0.4f, 0.05f, -0.2f,    0.0f,  1.0f, 0.0f,     0.3f, 1.0f, //S
+                                 -0.4f, 0.05f,  0.1f,    0.0f,  1.0f, 0.0f,     0.3f, 0.0f, //Q
+                                 -0.2f,  0.0f, -0.2f,    0.0f,  1.0f, 0.0f,     0.6f, 1.0f, //Z
+                                 -0.4f, 0.05f,  0.1f,    0.0f,  1.0f, 0.0f,     0.3f, 0.0f, //Q
+                                 -0.2f,  0.0f, -0.2f,    0.0f,  1.0f, 0.0f,     0.6f, 1.0f, //Z
+                                 -0.2f,  0.0f,  0.1f,    0.0f,  1.0f, 0.0f,     0.6f, 0.0f, //W
+                                 -0.2f,  0.0f,  0.1f,    0.0f,  1.0f, 0.0f,     0.6f, 0.0f, //W
+                                 -0.2f,  0.0f, -0.2f,    0.0f,  1.0f, 0.0f,     0.6f, 1.0f, //Z
+                                  0.0f,  0.0f,  0.0f,    0.0f,  1.0f, 0.0f,     1.0f, 0.3f, //A
+                                 -0.2f,  0.0f, -0.2f,    0.0f,  1.0f, 0.0f,     0.6f, 1.0f, //Z
+                                  0.0f,  0.0f,  0.0f,    0.0f,  1.0f, 0.0f,     1.0f, 0.3f, //A
+                                  0.0f,  0.0f, -0.1f,    0.0f,  1.0f, 0.0f,     1.0f, 0.6f, //C
+
+                                 // Front-side Handle       // Positive Z
+                                  0.0f,  0.0f,  0.0f,    0.0f, 0.0f,  1.0f,     0.0f, 0.1f, //A
+                                  0.0f, -0.05f, 0.0f,    0.0f, 0.0f,  1.0f,     0.0f, 0.0f, //B
+                                  0.6f,  0.0f,  0.0f,    0.0f, 0.0f,  1.0f,     1.0f, 1.0f, //E
+                                  0.6f,  0.0f,  0.0f,    0.0f, 0.0f,  1.0f,     1.0f, 1.0f, //E
+                                  0.0f, -0.05f, 0.0f,    0.0f, 0.0f,  1.0f,     0.0f, 0.0f, //B
+                                  0.6f, -0.1f,  0.0f,    0.0f, 0.0f,  1.0f,     1.0f, 0.0f, //F
+
+                                 // Bottom-side Handle      // Negative Y
+                                  0.0f, -0.05f, 0.0f,    0.0f, -1.0f, 0.0f,     0.0f, 1.0f, //B
+                                  0.0f, -0.05f, -0.1f,   0.0f, -1.0f, 0.0f,     0.0f, 0.0f, //D
+                                  0.6f, -0.1f,  0.0f,    0.0f, -1.0f, 0.0f,     1.0f, 1.0f, //F
+                                  0.0f, -0.05f, -0.1f,   0.0f, -1.0f, 0.0f,     0.0f, 0.0f, //D
+                                  0.6f, -0.1f,  0.0f,    0.0f, -1.0f, 0.0f,     1.0f, 1.0f, //F
+                                  0.6f, -0.1f, -0.1f,    0.0f, -1.0f, 0.0f,     1.0f, 0.0f, //H
+
+                                 // Back-side Handle        // Negative Z
+                                  0.0f,  0.0f, -0.1f,    0.0f, 0.0f, -1.0f,     0.0f, 1.0f, //C
+                                  0.0f, -0.05f, -0.1f,   0.0f, 0.0f, -1.0f,     0.0f, 0.0f, //D
+                                  0.6f,  0.0f, -0.1f,    0.0f, 0.0f, -1.0f,     1.0f, 1.0f, //G
+                                  0.0f, -0.05f, -0.1f,   0.0f, 0.0f, -1.0f,     0.0f, 0.0f, //D
+                                  0.6f,  0.0f, -0.1f,    0.0f, 0.0f, -1.0f,     1.0f, 1.0f, //G
+                                  0.6f, -0.1f, -0.1f,    0.0f, 0.0f, -1.0f,     1.0f, 0.0f, //H
+
+                                 // Top-side Handle         // Positive Y
+                                  0.0f,  0.0f,  0.0f,    0.0f,  1.0f, 0.0f,     0.0f, 1.0f, //A
+                                  0.0f,  0.0f, -0.1f,    0.0f,  1.0f, 0.0f,     0.0f, 0.0f, //C
+                                  0.6f,  0.0f,  0.0f,    0.0f,  1.0f, 0.0f,     1.0f, 1.0f, //E
+                                  0.0f,  0.0f, -0.1f,    0.0f,  1.0f, 0.0f,     0.0f, 0.0f, //C
+                                  0.6f,  0.0f,  0.0f,    0.0f,  1.0f, 0.0f,     1.0f, 1.0f, //E
+                                  0.6f,  0.0f, -0.1f,    0.0f,  1.0f, 0.0f,     1.0f, 0.0f, //G
+
+                                  // Grip Connection      // Negative X
+                                  0.6f,  0.0f,  0.1f,    -1.0f, 0.0f, 0.0f,     1.0f, 1.0f, //I
+                                  0.6f,  0.0f, -0.2f,    -1.0f, 0.0f, 0.0f,     0.0f, 1.0f, //J
+                                  0.6f, -0.1f,  0.1f,    -1.0f, 0.0f, 0.0f,     1.0f, 0.0f, //K
+                                  0.6f,  0.0f, -0.2f,    -1.0f, 0.0f, 0.0f,     0.0f, 1.0f, //J
+                                  0.6f, -0.1f,  0.1f,    -1.0f, 0.0f, 0.0f,     1.0f, 0.0f, //K
+                                  0.6f, -0.1f, -0.2f,    -1.0f, 0.0f, 0.0f,     0.0f, 0.0f, //L
+
+                                  // Front-side Grip        // Positive Z
+                                  0.6f,  0.0f,  0.1f,    0.0f, 0.0f,  1.0f,     0.0f, 1.0f, //I
+                                  1.0f,  0.0f, 0.05f,    0.0f, 0.0f,  1.0f,     1.0f, 0.0f, //M
+                                  0.6f, -0.1f,  0.1f,    0.0f, 0.0f,  1.0f,     0.0f, 0.0f, //K
+                                  1.0f,  0.0f, 0.05f,    0.0f, 0.0f,  1.0f,     1.0f, 0.0f, //M
+                                  0.6f, -0.1f,  0.1f,    0.0f, 0.0f,  1.0f,     0.0f, 0.0f, //K
+                                  1.0f, -0.1f, 0.05f,    0.0f, 0.0f,  1.0f,     1.0f, 1.0f, //N
+
+                                  // Bottom-side Grip       // Negative Y
+                                  0.6f, -0.1f,  0.1f,    0.0f, -1.0f, 0.0f,     0.0f, 0.0f, //K
+                                  1.0f, -0.1f, 0.05f,    0.0f, -1.0f, 0.0f,     1.0f, 0.0f, //N
+                                  0.6f, -0.1f, -0.2f,    0.0f, -1.0f, 0.0f,     0.0f, 1.0f, //L
+                                  1.0f, -0.1f, 0.05f,    0.0f, -1.0f, 0.0f,     1.0f, 0.0f, //N
+                                  0.6f, -0.1f, -0.2f,    0.0f, -1.0f, 0.0f,     0.0f, 1.0f, //L
+                                  1.0f, -0.1f, -0.15f,   0.0f, -1.0f, 0.0f,     1.0f, 1.0f, //P
+
+                                  // Back-side Grip         // Negative Z
+                                  0.6f,  0.0f, -0.2f,    0.0f, 0.0f, -1.0f,     0.0f, 1.0f, //J
+                                  0.6f, -0.1f, -0.2f,    0.0f, 0.0f, -1.0f,     0.0f, 0.0f, //L
+                                  1.0f,  0.0f, -0.15f,   0.0f, 0.0f, -1.0f,     1.0f, 1.0f, //O
+                                  0.6f, -0.1f, -0.2f,    0.0f, 0.0f, -1.0f,     0.0f, 0.0f, //L
+                                  1.0f,  0.0f, -0.15f,   0.0f, 0.0f, -1.0f,     1.0f, 1.0f, //O
+                                  1.0f, -0.1f, -0.15f,   0.0f, 0.0f, -1.0f,     1.0f, 0.0f, //P
+
+                                  // Top-side Grip          // Positive Y
+                                  1.0f,  0.0f, -0.15f,   0.0f,  1.0f, 0.0f,     1.0f, 0.0f, //O
+                                  1.0f,  0.0f, 0.05f,    0.0f,  1.0f, 0.0f,     1.0f, 1.0f, //M
+                                  0.6f,  0.0f, -0.2f,    0.0f,  1.0f, 0.0f,     0.0f, 0.0f, //J
+                                  1.0f,  0.0f, 0.05f,    0.0f,  1.0f, 0.0f,     1.0f, 1.0, //M
+                                  0.6f,  0.0f, -0.2f,    0.0f,  1.0f, 0.0f,     0.0f, 0.0f, //J
+                                  0.6f,  0.0f,  0.1f,    0.0f,  1.0f, 0.0f,     0.0f, 1.0f, //I
+
+                                  // Base-side Grip         // Positive X
+                                  1.0f,  0.0f, 0.05f,    1.0f, 0.0f, 0.0f,      0.0f, 1.0f, //M
+                                  1.0f, -0.1f, 0.05f,    1.0f, 0.0f, 0.0f,      0.0f, 0.0f, //N
+                                  1.0f,  0.0f, -0.15f,   1.0f, 0.0f, 0.0f,      1.0f, 1.0f, //O
+
+                                  1.0f, -0.1f, 0.05f,    1.0f, 0.0f, 0.0f,      0.0f, 0.0f, //N
+                                  1.0f,  0.0f, -0.15f,   1.0f, 0.0f, 0.0f,      1.0f, 1.0f, //O
+                                  1.0f, -0.1f, -0.15f,   1.0f, 0.0f, 0.0f,      1.0f, 0.0f  //P
+
+                            };
+
+    // Generate buffer ids
+            glGenVertexArrays(1, &SpoonVAO);
+            glGenBuffers(1, &VBO);
+
+            // Activate the Vertex Array Object before binding and setting any VBOs and Vertex Attribute Pointers.
+            glBindVertexArray(SpoonVAO);
+
+            // Activate the VBO
+            glBindBuffer(GL_ARRAY_BUFFER, VBO);
+            glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW); // Copy vertices to VBO
+
+            // Set attribute pointer 0 to hold position data
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(GLfloat), (GLvoid*)0);
+            glEnableVertexAttribArray(0); // Enables vertex attribute
+
+            // Set attribute pointer 1 to hold Normal data
+            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(GLfloat), (GLvoid*)(3 * sizeof(GLfloat)));
+            glEnableVertexAttribArray(1); // Enables vertex attribute
+
+            // Set attribute pointer 2 to hold Texture coordinate data
+            glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(GLfloat), (GLvoid*)(6 * sizeof(GLfloat)));
+            glEnableVertexAttribArray(2);
+
+            glBindVertexArray(0); // Deactivate the Spoon VAO which is good practice
+
+    }
+
+void pressKey(int key, int xx, int yy)
+{
+    switch(key){
+
+     // Zoom in
+     case GLUT_KEY_UP:
+          cameraPosition += front * 0.1f;
+          break;
+
+     // Zoom out
+    case GLUT_KEY_DOWN:
+         cameraPosition -= front * 0.1f;
+         break;
+
+    // View in orthogonal state
+    case GLUT_KEY_LEFT:
+        view_state = 0;
+        break;
+
+    // View in perspective state
+    case GLUT_KEY_RIGHT:
+        view_state = 1;
+        break;
+    }
+
+}
+
+/*Implements the UMouseMove function*/
+void UMouseMove(int x, int y)
+{
+    // Immediately replaces center locked coordinated with new mouse coordinates
+    if(mouseDetected)
+    {
+        lastMouseX = x;
+        lastMouseY = y;
+        mouseDetected = false;
+    }
+
+    // Gets the direction the mouse was moved in x and y
+    mouseXOffset = x - lastMouseX;
+    mouseYOffset = lastMouseY - y; //Inverted Y
+
+    // Updates with new mouse coordinates
+    lastMouseX = x;
+    lastMouseY = y;
+
+    // Applies sensitivity to mouse direction
+    mouseXOffset *= sensitivity;
+    mouseYOffset *= sensitivity;
+
+    // Accumulates the yaw and pitch variables
+    yaw += mouseXOffset;
+    pitch += mouseYOffset;
+
+    // Maintains a 90 degree pitch for gimbal lock
+    if(pitch > 89.0f)
+        pitch = 89.0f;
+
+    if(pitch < -89.0f)
+        pitch = -89.0f;
+
+    // Converts mouse coordinates / degrees into Radians, then to vectors
+    front.x = cos(glm::radians(pitch)) * cos(glm::radians(yaw));
+    front.y = sin(glm::radians(pitch));
+    front.z = cos(glm::radians(pitch)) * sin(glm::radians(yaw));
+
+    cameraPosition = - front * glm::length( cameraPosition );
+}
+
+/*Generate and load the texture*/
+void UGenerateTexture(){
+
+	       glGenTextures(1, &texture);
+	       glBindTexture(GL_TEXTURE_2D, texture);
+
+	       int width, height;
+
+	       unsigned char* image = SOIL_load_image("spoon.jpg", &width, &height, 0, SOIL_LOAD_RGB); // Loads the texture file
+
+	       glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, image);
+	       glGenerateMipmap(GL_TEXTURE_2D);
+	       SOIL_free_image_data(image);
+	       glBindTexture(GL_TEXTURE_2D, 0); // Unbinds the texture
+}
+
